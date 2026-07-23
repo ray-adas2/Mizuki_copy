@@ -1,176 +1,109 @@
 <script>
 	import PostList from "./PostList.svelte";
 	import PostEditor from "./PostEditor.svelte";
+	import SettingsPanel from "./SettingsPanel.svelte";
 
-	// --- State ---
+	let currentTab = $state("posts");
 	let posts = $state([]);
 	let selectedSlug = $state(null);
-	let editingPost = $state(null); // { slug, frontmatter, content } | null
+	let editingPost = $state(null);
 	let isNew = $state(false);
 	let loading = $state(true);
 	let saving = $state(false);
 	let buildStatus = $state({ building: false, success: false, lastBuildTime: 0, lastBuildLog: "", lastBuildError: "" });
 	let buildLogVisible = $state(false);
-	let message = $state("");
+	let toast = $state(null);
 
-	// --- Computed ---
-	let selectedPost = $derived(posts.find((p) => p.slug === selectedSlug) || null);
+	let draftCount = $derived(posts.filter(p => p.frontmatter.draft).length);
+	let publishedCount = $derived(posts.filter(p => !p.frontmatter.draft).length);
 
-	// --- Auth check ---
+	function showToast(text, type = "info") {
+		toast = { text, type };
+		setTimeout(() => { if (toast?.text === text) toast = null; }, 3000);
+	}
+
 	async function checkAuth() {
 		try {
 			const res = await fetch("/api/admin/auth");
-			const data = await res.json();
-			if (!data.ok) {
-				window.location.href = "/admin/login";
-				return false;
-			}
+			if (!(await res.json()).ok) { window.location.href = "/admin/login"; return false; }
 			return true;
-		} catch {
-			window.location.href = "/admin/login";
-			return false;
-		}
+		} catch { window.location.href = "/admin/login"; return false; }
 	}
 
-	// --- Data loading ---
-	async function loadPosts() {
-		const res = await fetch("/api/admin/posts");
-		if (res.status === 401) {
-			window.location.href = "/admin/login";
-			return;
-		}
-		posts = await res.json();
+	async function loadAll() {
+		const [postsRes, buildRes] = await Promise.all([
+			fetch("/api/admin/posts"), fetch("/api/admin/rebuild")
+		]);
+		if (postsRes.status === 401) { window.location.href = "/admin/login"; return; }
+		posts = await postsRes.json();
+		try { buildStatus = await buildRes.json(); } catch { /* */ }
 	}
 
-	async function loadBuildStatus() {
-		try {
-			const res = await fetch("/api/admin/rebuild");
-			buildStatus = await res.json();
-		} catch { /* ignore */ }
-	}
-
-	// --- Actions ---
 	function selectPost(slug) {
 		if (saving) return;
-		isNew = false;
-		selectedSlug = slug;
-		editingPost = null;
-		loadPost(slug);
-	}
-
-	async function loadPost(slug) {
-		const res = await fetch(`/api/admin/posts/${slug}`);
-		if (res.status === 401) { window.location.href = "/admin/login"; return; }
-		editingPost = await res.json();
+		isNew = false; selectedSlug = slug;
+		fetch(`/api/admin/posts/${slug}`).then(r => r.json()).then(p => editingPost = p);
 	}
 
 	function newPost() {
 		if (saving) return;
-		isNew = true;
-		selectedSlug = null;
+		isNew = true; selectedSlug = null;
 		editingPost = {
 			slug: "",
 			frontmatter: {
-				title: "",
-				published: new Date().toISOString().slice(0, 10),
-				description: "",
-				image: "",
-				tags: [],
-				category: "",
-				draft: false,
-				pinned: false,
-				comment: true,
+				title: "", published: new Date().toISOString().slice(0, 10),
+				description: "", image: "", tags: [], category: "",
+				draft: false, pinned: false, comment: true,
 			},
 			content: "",
 		};
 	}
 
-	async function savePost(frontmatter, content) {
-		saving = true;
-		showMessage("保存中...");
+	async function savePost(fm, content) {
+		saving = true; showToast("保存中...", "info");
 		try {
-			let res, data;
-			if (isNew) {
-				res = await fetch("/api/admin/posts", {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ frontmatter, content }),
-				});
-			} else {
-				res = await fetch(`/api/admin/posts/${editingPost.slug}`, {
-					method: "PUT",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ frontmatter, content }),
-				});
-			}
-			data = await res.json();
+			const url = isNew ? "/api/admin/posts" : `/api/admin/posts/${editingPost.slug}`;
+			const method = isNew ? "POST" : "PUT";
+			const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ frontmatter: fm, content }) });
+			const data = await res.json();
 			if (res.ok) {
-				showMessage("保存成功！");
-				isNew = false;
-				await loadPosts();
-				selectedSlug = data.slug;
-				await loadPost(data.slug);
-			} else {
-				showMessage(data.error || "保存失败", true);
-			}
-		} catch (err) {
-			showMessage("网络错误: " + (err.message || "未知"), true);
-		} finally {
-			saving = false;
-		}
+				showToast("✅ 保存成功", "success"); isNew = false;
+				await loadAll(); selectedSlug = data.slug;
+				fetch(`/api/admin/posts/${data.slug}`).then(r => r.json()).then(p => editingPost = p);
+			} else { showToast("❌ " + (data.error || "保存失败"), "error"); }
+		} catch { showToast("❌ 网络错误", "error"); }
+		finally { saving = false; }
 	}
 
 	async function deletePost(slug) {
-		if (!confirm("确定要删除这篇文章吗？\n（会移到回收站）")) return;
+		if (!confirm("确定删除这篇文章？")) return;
 		const res = await fetch(`/api/admin/posts/${slug}`, { method: "DELETE" });
 		if (res.ok) {
-			showMessage("已删除");
-			posts = posts.filter((p) => p.slug !== slug);
-			if (selectedSlug === slug) {
-				selectedSlug = null;
-				editingPost = null;
-			}
-		} else {
-			const data = await res.json();
-			showMessage(data.error || "删除失败", true);
-		}
+			showToast("🗑️ 已删除", "success");
+			posts = posts.filter(p => p.slug !== slug);
+			if (selectedSlug === slug) { selectedSlug = null; editingPost = null; }
+		} else { showToast("❌ 删除失败", "error"); }
 	}
 
 	async function triggerBuild() {
-		buildLogVisible = true;
-		buildStatus = { ...buildStatus, building: true };
-		showMessage("构建中...");
+		buildLogVisible = true; buildStatus = { ...buildStatus, building: true };
+		showToast("🔨 构建中...", "info");
 		try {
 			const res = await fetch("/api/admin/rebuild", { method: "POST" });
 			buildStatus = await res.json();
-			if (buildStatus.success) {
-				showMessage("构建完成！博客已更新。");
-			} else {
-				showMessage("构建失败！查看日志了解详情。", true);
-			}
-		} catch {
-			showMessage("构建请求失败", true);
-		}
+			if (buildStatus.success) showToast("✅ 构建完成！博客已更新", "success");
+			else showToast("❌ 构建失败，查看日志", "error");
+		} catch { showToast("❌ 网络错误", "error"); }
 	}
 
-	async function logout() {
-		await fetch("/api/admin/auth", { method: "DELETE" });
-		window.location.href = "/admin/login";
+	function logout() {
+		fetch("/api/admin/auth", { method: "DELETE" }).then(() => { window.location.href = "/admin/login"; });
 	}
 
-	let msgTimer = null;
-	function showMessage(msg, isError = false) {
-		message = msg;
-		if (msgTimer) clearTimeout(msgTimer);
-		if (!isError) msgTimer = setTimeout(() => (message = ""), 3000);
-	}
-
-	// --- Init ---
 	$effect(() => {
 		(async () => {
-			const authed = await checkAuth();
-			if (!authed) return;
-			await Promise.all([loadPosts(), loadBuildStatus()]);
+			if (!(await checkAuth())) return;
+			await loadAll();
 			loading = false;
 		})();
 	});
@@ -179,264 +112,88 @@
 {#if loading}
 	<div class="loading-screen">
 		<div class="spinner"></div>
-		<p>加载中...</p>
+		<p>正在加载管理后台...</p>
 	</div>
 {:else}
-	<div class="admin-layout">
-		<!-- Header -->
-		<header class="admin-header">
-			<div class="header-left">
-				<h1>🌸 博客管理</h1>
-				<a href="/" target="_blank" class="view-site">查看网站 ↗</a>
+	<div class="admin-app">
+		<header class="topbar">
+			<div class="topbar-brand">
+				<span class="brand-icon">🌸</span>
+				<div><h1>博客管理</h1><span class="brand-sub">Mizuki Admin</span></div>
 			</div>
-			<div class="header-actions">
-				<button class="btn btn-primary" onclick={newPost}>+ 新建文章</button>
-				<button
-					class="btn btn-build"
-					onclick={triggerBuild}
-					disabled={buildStatus.building}
-				>
-					{buildStatus.building ? "⏳ 构建中..." : "🔄 重新构建"}
+			<div class="topbar-stats">
+				<div class="stat-item"><span class="stat-num">{publishedCount}</span><span class="stat-label">已发布</span></div>
+				<div class="stat-item"><span class="stat-num">{draftCount}</span><span class="stat-label">草稿</span></div>
+				{#if buildStatus.lastBuildTime}
+					<div class="stat-item"><span class="stat-num stat-time">{new Date(buildStatus.lastBuildTime).toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit"})}</span><span class="stat-label">上次构建</span></div>
+				{/if}
+			</div>
+			<div class="topbar-actions">
+				<button class="btn btn-outline" onclick={newPost}><span class="btn-icon">＋</span> 写文章</button>
+				<button class="btn btn-primary" onclick={triggerBuild} disabled={buildStatus.building}>
+					<span class="btn-icon">{buildStatus.building ? "⏳" : "🚀"}</span> {buildStatus.building ? "构建中..." : "发布更新"}
 				</button>
-				<button class="btn btn-logout" onclick={logout}>退出</button>
+				<a href="/" target="_blank" class="btn btn-ghost" title="查看网站">🔗</a>
+				<button class="btn btn-ghost" onclick={logout} title="退出登录">🚪</button>
 			</div>
 		</header>
 
-		<!-- Message toast -->
-		{#if message}
-			<div class="toast">{message}</div>
-		{/if}
+		{#if toast}<div class="toast toast-{toast.type}">{toast.text}</div>{/if}
 
-		<!-- Main content -->
 		<div class="admin-body">
-			<!-- Left sidebar: Post list -->
 			<aside class="sidebar">
-				<PostList
-					{posts}
-					{selectedSlug}
-					onSelect={selectPost}
-					onDelete={deletePost}
-				/>
+				<div class="tab-bar">
+					<button class="tab-btn" class:active={currentTab === "posts"} onclick={() => currentTab = "posts"}>📝 文章</button>
+					<button class="tab-btn" class:active={currentTab === "settings"} onclick={() => currentTab = "settings"}>⚙️ 设置</button>
+				</div>
+				{#if currentTab === "posts"}
+					<div class="sidebar-header"><h2>文章列表</h2><span class="sidebar-count">{posts.length} 篇</span></div>
+					<PostList {posts} {selectedSlug} onSelect={selectPost} onDelete={deletePost} />
+				{/if}
 			</aside>
-
-			<!-- Right: Editor -->
-			<main class="editor-area">
-				{#if editingPost}
-					<PostEditor
-						post={editingPost}
-						{isNew}
-						{saving}
-						onSave={savePost}
-					/>
+			<main class="main-area">
+				{#if currentTab === "settings"}
+					<SettingsPanel />
+				{:else if editingPost}
+					<PostEditor post={editingPost} {isNew} {saving} onSave={savePost} />
 				{:else}
-					<div class="empty-state">
-						<div class="empty-icon">📝</div>
-						<h3>选择文章开始编辑</h3>
-						<p>从左侧列表选择一篇文章，或点击「新建文章」</p>
-						<button class="btn btn-primary" onclick={newPost}>创建第一篇文章</button>
+					<div class="welcome">
+						<div class="welcome-card">
+							<div class="welcome-illustration">✍️</div>
+							<h2>欢迎使用博客管理后台</h2>
+							<p>在这里你可以轻松管理博客文章，无需接触代码</p>
+							<div class="quick-actions">
+								<button class="quick-action primary" onclick={newPost}>
+									<span class="qa-icon">📝</span>
+									<div><strong>写一篇新文章</strong><span>使用 Markdown 编辑器开始创作</span></div>
+								</button>
+								<button class="quick-action" onclick={() => posts[0] && selectPost(posts[0].slug)}>
+									<span class="qa-icon">📋</span>
+									<div><strong>编辑已有文章</strong><span>从左侧列表选择一篇文章开始编辑</span></div>
+								</button>
+								<button class="quick-action" onclick={triggerBuild}>
+									<span class="qa-icon">🚀</span>
+									<div><strong>发布更新</strong><span>文章修改后，点击这里让改动生效</span></div>
+								</button>
+							</div>
+							<div class="welcome-tip">💡 <strong>提示：</strong>编辑器中按 <kbd>Ctrl+S</kbd> 可快速保存</div>
+						</div>
 					</div>
 				{/if}
 			</main>
 		</div>
 
-		<!-- Build log -->
 		{#if buildLogVisible}
-			<div class="build-log-overlay" onclick={() => (buildLogVisible = false)}>
-				<div class="build-log" onclick={(e) => e.stopPropagation()}>
-					<div class="build-log-header">
-						<h3>构建日志</h3>
-						<button class="btn-close" onclick={() => (buildLogVisible = false)}>✕</button>
+			<div class="modal-overlay" onclick={() => buildLogVisible = false}>
+				<div class="modal" onclick={e => e.stopPropagation()}>
+					<div class="modal-header">
+						<h3>📋 构建日志</h3>
+						<button class="btn-close" onclick={() => buildLogVisible = false}>✕</button>
 					</div>
-					<pre class="build-log-content">{buildStatus.lastBuildLog || "暂无日志"}</pre>
-					{#if buildStatus.lastBuildError}
-						<pre class="build-log-error">{buildStatus.lastBuildError}</pre>
-					{/if}
-					{#if buildStatus.lastBuildTime}
-						<p class="build-log-time">构建时间: {new Date(buildStatus.lastBuildTime).toLocaleString("zh-CN")}</p>
-					{/if}
+					<pre class="modal-log">{buildStatus.lastBuildLog || "暂无日志"}</pre>
+					{#if buildStatus.lastBuildError}<pre class="modal-log modal-log-error">{buildStatus.lastBuildError}</pre>{/if}
 				</div>
 			</div>
 		{/if}
 	</div>
 {/if}
-
-<style>
-	.loading-screen {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		height: 100vh;
-		gap: 16px;
-		color: var(--text-secondary);
-	}
-	.spinner {
-		width: 36px;
-		height: 36px;
-		border: 3px solid var(--border);
-		border-top-color: var(--accent);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
-	@keyframes spin { to { transform: rotate(360deg); } }
-
-	.admin-layout {
-		display: flex;
-		flex-direction: column;
-		height: 100vh;
-	}
-	.admin-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 12px 20px;
-		background: var(--bg-secondary);
-		border-bottom: 1px solid var(--border);
-		flex-shrink: 0;
-	}
-	.header-left {
-		display: flex;
-		align-items: center;
-		gap: 16px;
-	}
-	.header-left h1 {
-		font-size: 1.15rem;
-		font-weight: 600;
-	}
-	.view-site {
-		color: var(--text-muted);
-		text-decoration: none;
-		font-size: 0.8rem;
-	}
-	.view-site:hover { color: var(--accent); }
-	.header-actions {
-		display: flex;
-		gap: 8px;
-	}
-
-	/* Buttons */
-	.btn {
-		padding: 8px 16px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-card);
-		color: var(--text-primary);
-		font-size: 0.85rem;
-		cursor: pointer;
-		transition: all 0.15s;
-		white-space: nowrap;
-	}
-	.btn:hover { background: var(--bg-hover); }
-	.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-	.btn-primary {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: white;
-	}
-	.btn-primary:hover { background: var(--accent-hover); }
-	.btn-build { font-size: 0.8rem; }
-	.btn-logout {
-		font-size: 0.8rem;
-		color: var(--text-muted);
-	}
-
-	/* Toast */
-	.toast {
-		position: fixed;
-		top: 60px;
-		left: 50%;
-		transform: translateX(-50%);
-		background: var(--accent);
-		color: white;
-		padding: 8px 24px;
-		border-radius: 20px;
-		font-size: 0.85rem;
-		z-index: 1000;
-		animation: fadeIn 0.2s;
-	}
-	@keyframes fadeIn { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } }
-
-	/* Body */
-	.admin-body {
-		display: flex;
-		flex: 1;
-		overflow: hidden;
-	}
-	.sidebar {
-		width: 320px;
-		flex-shrink: 0;
-		border-right: 1px solid var(--border);
-		background: var(--bg-secondary);
-		overflow-y: auto;
-	}
-	.editor-area {
-		flex: 1;
-		overflow-y: auto;
-		background: var(--bg-primary);
-	}
-	.empty-state {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		height: 100%;
-		gap: 12px;
-		color: var(--text-muted);
-	}
-	.empty-icon { font-size: 3rem; }
-	.empty-state h3 { font-size: 1.1rem; color: var(--text-secondary); }
-	.empty-state p { font-size: 0.85rem; }
-
-	/* Build log overlay */
-	.build-log-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0,0,0,0.6);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 500;
-	}
-	.build-log {
-		background: var(--bg-card);
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		width: 90%;
-		max-width: 700px;
-		max-height: 80vh;
-		display: flex;
-		flex-direction: column;
-	}
-	.build-log-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 14px 18px;
-		border-bottom: 1px solid var(--border);
-	}
-	.build-log-header h3 { font-size: 1rem; }
-	.btn-close {
-		background: none;
-		border: none;
-		color: var(--text-muted);
-		font-size: 1.1rem;
-		cursor: pointer;
-	}
-	.build-log-content, .build-log-error {
-		flex: 1;
-		overflow-y: auto;
-		padding: 14px 18px;
-		font-family: "JetBrains Mono", monospace;
-		font-size: 0.78rem;
-		line-height: 1.5;
-		white-space: pre-wrap;
-		word-break: break-all;
-	}
-	.build-log-error { color: var(--danger); }
-	.build-log-time {
-		padding: 10px 18px;
-		font-size: 0.78rem;
-		color: var(--text-muted);
-		border-top: 1px solid var(--border);
-	}
-</style>

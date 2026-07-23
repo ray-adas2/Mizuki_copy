@@ -1,20 +1,27 @@
 ---
-title: Draft Example
-published: 2022-07-01
-tags: [Markdown, Blogging, Demo]
-category: Examples
-draft: true
+title: 这是第一篇文章
+published: 2026-07-22
+description: 第一次使用该网站
+tags: ["介绍，新手，菜鸟"]
+category: 网站介绍
+draft: false
+pinned: true
+comment: true
+updated: 2026-07-22
 ---
 
-# This Article is a Draft
 
-This article is currently in a draft state and is not published. Therefore, it will not be visible to the general audience. The content is still a work in progress and may require further editing and review.
 
-When the article is ready for publication, you can update the "draft" field to "false" in the Frontmatter:
+
+
+
+# 标题
+
+这是我第一次使用这个网站，很多内容还没有修改，和CC配合搭建了一个简单的后台管理界面
 
 ```markdown
 ---
-title: Draft Example
+title: 第一篇文章
 published: 2024-01-11T04:40:26.381Z
 tags: [Markdown, Blogging, Demo]
 category: Examples

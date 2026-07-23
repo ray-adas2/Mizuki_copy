@@ -96,7 +96,7 @@ function getStoredHash() {
 }
 
 // 需要用 readFileSync 读取 .env
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 // ============================================================
 // 文章管理
@@ -409,7 +409,7 @@ async function handlePosts(req, res) {
 	// 解析 /api/admin/posts 或 /api/admin/posts/some-slug
 	const url = new URL(req.url, "http://localhost");
 	const path = url.pathname.replace(/^\/api\/admin\/posts\/?/, "");
-	const slug = path || null;
+	const slug = path ? decodeURIComponent(path) : null;
 
 	// GET /api/admin/posts - 列表
 	if (method === "GET" && !slug) {
@@ -455,7 +455,7 @@ async function handlePosts(req, res) {
 			return json(res, { error: "标题不能为空" }, 400);
 		}
 
-		await savePost(slug, body.frontmatter, body.content || "");
+			await savePost(slug, body.frontmatter, body.content || "");
 		return json(res, { ok: true, slug });
 	}
 
@@ -554,6 +554,174 @@ async function handleRebuild(req, res) {
 }
 
 // ============================================================
+// 配置管理
+// ============================================================
+const CONFIG_FILES = {
+	site: join(ROOT_DIR, "src", "config", "siteConfig.ts"),
+	profile: join(ROOT_DIR, "src", "config", "profileConfig.ts"),
+};
+
+// 简单的字段读写：从 TS 源文件中提取/替换 export const 值
+function readConfigField(content, fieldPath) {
+	const parts = fieldPath.split(".");
+	let section = content;
+
+	for (let i = 0; i < parts.length - 1; i++) {
+		const re = new RegExp(`${parts[i]}:\\s*\\{`, "m");
+		const m = section.match(re);
+		if (!m) return undefined;
+		section = section.slice(m.index);
+	}
+
+	const key = parts[parts.length - 1];
+	// 匹配整行：key: value
+	const re = new RegExp(`${key}:\\s*(.+)`, "m");
+	const m = section.match(re);
+	if (!m) return undefined;
+	let val = m[1].trim();
+	// 顺序很重要：先删注释再删逗号，否则逗号被注释挡住删不掉
+	val = val.replace(/\s+\/\/.*$/, ""); // 去掉行尾注释
+	val = val.replace(/,\s*$/, "");        // 去掉尾随逗号
+	// 去掉字符串引号
+	if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+		val = val.slice(1, -1);
+	}
+	if (val === "true") return true;
+	if (val === "false") return false;
+	if (/^\d+$/.test(val)) return Number(val);
+	return val;
+}
+
+function writeConfigField(content, fieldPath, value) {
+	const parts = fieldPath.split(".");
+	let section = content;
+	let sectionOffset = 0;
+
+	for (let i = 0; i < parts.length - 1; i++) {
+		const re = new RegExp(`${parts[i]}:\\s*\\{`, "m");
+		const m = section.match(re);
+		if (!m) return null;
+		sectionOffset += m.index;
+		section = section.slice(m.index);
+	}
+
+	const key = parts[parts.length - 1];
+	const lineRe = new RegExp(`^(\\s*)(${key}:\\s*)(.+)$`, "m");
+	const m = section.match(lineRe);
+	if (!m) return null;
+
+	const indent = m[1];
+	const prefix = m[2];
+	const oldLine = m[0];
+	const localIndex = m.index;
+
+	let newVal;
+	if (typeof value === "string") newVal = `"${value}"`;
+	else if (typeof value === "boolean") newVal = String(value);
+	else if (typeof value === "number") newVal = String(value);
+	else return null;
+
+	// 检测逗号：先去掉注释，再判断是否以逗号结尾
+	const beforeComment = oldLine.replace(/\s*\/\/.*$/, "").trimEnd();
+	const trailingComma = beforeComment.endsWith(",") ? "," : "";
+	// 保留原行注释
+	const commentMatch = oldLine.match(/\s+\/\/.*$/);
+	const trailingComment = commentMatch ? commentMatch[0] : "";
+
+	const newLine = `${indent}${prefix}${newVal}${trailingComma}${trailingComment}`;
+	const globalIndex = sectionOffset + localIndex;
+	return content.substring(0, globalIndex) + newLine + content.substring(globalIndex + oldLine.length);
+}
+
+// 预定义可编辑字段
+const EDITABLE_FIELDS = [
+	// siteConfig.ts
+	{ file: "site", key: "title", label: "站点标题" },
+	{ file: "site", key: "subtitle", label: "站点副标题" },
+	{ file: "site", key: "banner.homeText.title", label: "首页大标题" },
+	{ file: "site", key: "lang", label: "语言 (en/zh_CN/ja)" },
+	{ file: "site", key: "themeColor.hue", label: "主题色 (0-360)" },
+	// profileConfig.ts
+	{ file: "profile", key: "avatar", label: "头像路径" },
+	{ file: "profile", key: "name", label: "昵称" },
+	{ file: "profile", key: "bio", label: "个人简介" },
+];
+
+async function handleConfig(req, res) {
+	// GET - 读取配置
+	if (req.method === "GET") {
+		const result = {};
+		for (const field of EDITABLE_FIELDS) {
+			try {
+				const content = readFileSync(CONFIG_FILES[field.file], "utf-8");
+				result[field.key] = readConfigField(content, field.key);
+			} catch { result[field.key] = null; }
+		}
+			return json(res, { fields: EDITABLE_FIELDS, values: result });
+	}
+
+	// PUT - 更新配置
+	if (req.method === "PUT") {
+		const body = await getBody(req);
+		if (!body || typeof body !== "object") return json(res, { error: "无效数据" }, 400);
+
+		const updatesByFile = {};
+		for (const [key, value] of Object.entries(body)) {
+			const field = EDITABLE_FIELDS.find(f => f.key === key) || { file: "profile", key };
+			const fileKey = field.file;
+			if (!updatesByFile[fileKey]) updatesByFile[fileKey] = {};
+			updatesByFile[fileKey][key] = value;
+		}
+
+		try {
+			for (const [fileKey, updates] of Object.entries(updatesByFile)) {
+				let content = readFileSync(CONFIG_FILES[fileKey], "utf-8");
+				for (const [key, value] of Object.entries(updates)) {
+					const newContent = writeConfigField(content, key, value);
+					if (newContent !== null) content = newContent;
+				}
+				writeFileSync(CONFIG_FILES[fileKey], content, "utf-8");
+			}
+			return json(res, { ok: true });
+		} catch (err) {
+			return json(res, { error: "保存失败: " + err.message }, 500);
+		}
+	}
+
+	json(res, { error: "Method not allowed" }, 405);
+}
+
+// ============================================================
+// 关于页面管理
+// ============================================================
+const ABOUT_PATH = join(ROOT_DIR, "src", "content", "spec", "about.md");
+
+async function handleAbout(req, res) {
+	if (req.method === "GET") {
+		try {
+			if (!existsSync(ABOUT_PATH)) return json(res, { content: "", frontmatter: { title: "关于" } });
+			const raw = readFileSync(ABOUT_PATH, "utf-8");
+			const { frontmatter, content } = parseFrontmatter(raw);
+			return json(res, { frontmatter, content });
+		} catch (err) {
+			return json(res, { error: "读取失败" }, 500);
+		}
+	}
+
+	if (req.method === "PUT") {
+		const body = await getBody(req);
+		if (!body) return json(res, { error: "无效数据" }, 400);
+		const fm = { title: "关于", ...body.frontmatter };
+		const fmBlock = serializeFrontmatter(fm);
+		const md = `---\n${fmBlock}\n---\n\n${body.content || ""}`;
+		await writeFile(ABOUT_PATH, md, "utf-8");
+		return json(res, { ok: true });
+	}
+
+	json(res, { error: "Method not allowed" }, 405);
+}
+
+// ============================================================
 // 路由分发
 // ============================================================
 function route(req, res) {
@@ -588,6 +756,12 @@ function route(req, res) {
 		if (path === "/api/admin/rebuild") {
 			return handleRebuild(req, res);
 		}
+		if (path === "/api/admin/config") {
+			return handleConfig(req, res);
+		}
+		if (path === "/api/admin/about") {
+			return handleAbout(req, res);
+		}
 
 		json(res, { error: "Not found" }, 404);
 	} catch (err) {
@@ -603,7 +777,7 @@ const server = createServer(route);
 
 server.listen(PORT, () => {
 	console.log(`🔧 管理后台 API 服务器已启动: http://localhost:${PORT}`);
-	console.log(`   API 端点: /api/admin/auth, /api/admin/posts, /api/admin/upload, /api/admin/rebuild`);
+	console.log(`   API 端点: /api/admin/auth, posts, upload, rebuild, config`);
 
 	const storedHash = getStoredHash();
 	if (!storedHash) {
