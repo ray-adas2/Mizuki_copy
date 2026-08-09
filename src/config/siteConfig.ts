@@ -6,7 +6,7 @@ const SITE_LANG = "zh_CN"; // 语言代码，例如：'en', 'zh_CN', 'ja' 等。
 export const siteConfig: SiteConfig = {
 	title: "Ray的个人博客",
 	subtitle: "欢迎你的到来！",
-	siteURL: "http://8.148.12.5/", // 请替换为你的站点URL，以斜杠结尾
+	siteURL: "https://teaparty.top/", // 请替换为你的站点URL，以斜杠结尾
 	siteStartDate: "2026-07-22", // 站点开始运行日期，用于站点统计组件计算运行天数
 
 	lang: "zh_CN",
